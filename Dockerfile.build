@@ -1,0 +1,26 @@
+FROM golang:1.15-alpine3.12
+RUN apk add git openssh curl bash jq
+
+COPY files /go
+RUN mkdir -p /root/.ssh
+RUN chmod +x /go/gitlab.sh
+RUN /go/gitlab.sh
+
+WORKDIR /go/src/app
+COPY consul-rr .
+RUN go env -w GOPRIVATE="gitlab.com"
+RUN go env -w GO111MODULE="on"
+RUN go get -d -v ./... \
+    && go install -v ./... \
+    && \rm -r -f /go/src/app/* \
+    && \rm -r -f /go/pkg/mod \
+    && \rm -r -f /go/pkg/sumdb
+RUN rm /go/gitlab_rsa
+RUN mkdir -p authz
+RUN mkdir -p authz/app-access
+RUN mkdir -p authz/routing
+RUN mkdir -p authz/tracing
+RUN mkdir -p authz/stats
+
+EXPOSE 80/tcp 
+CMD ["/go/bin/consul-rr"]
