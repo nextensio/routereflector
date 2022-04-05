@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"strings"
 
 	"github.com/golang/glog"
 	"go.mongodb.org/mongo-driver/bson"
@@ -45,9 +46,10 @@ func DBConnect(namespace string) bool {
 		return false
 	}
 
-	serviceDB = dbClient.Database("Nxt-" + namespace + "-DB")
+	ns := strings.TrimPrefix(namespace, "nxt-")
+	serviceDB = dbClient.Database("Nxt-" + ns + "-DB")
 	serviceCltn = serviceDB.Collection("NxtServices")
-
+	glog.Info("Connected to db " + "Nxt-" + ns + "-DB")
 	return true
 }
 
