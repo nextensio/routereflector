@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"strings"
@@ -93,6 +94,9 @@ func RegisterConsul(dns *svcInfo) (e error) {
 		if resp != nil {
 			status = resp.StatusCode
 		}
+		if e == nil {
+			e = fmt.Errorf("bad http response %d", status)
+		}
 		glog.Errorf("Consul: failed to register via http PUT at %s, error %s, %d", url, e, status)
 		glog.Errorf("Consul: failed to register service json %s", js)
 		return e
@@ -102,7 +106,6 @@ func RegisterConsul(dns *svcInfo) (e error) {
 
 /*
  * DeRegister DNS entry and PodIP:Podname key:value pair for the service
- * Service being deregistered automatically deletes the consul health check
  */
 func DeRegisterConsul(id string) (e error) {
 	var err error
@@ -136,7 +139,7 @@ func DeRegisterConsul(id string) (e error) {
  *  - Creates a map of service entries and marks it add or del to indicate if
  *  - the service needs to be added/deleted from DB.
  */
-func getAllConsulServices() (error, map[string]bool) {
+func getAllConsulServices() (map[string]bool, error) {
 	services := make(map[string][]string)
 	svcSummary := make(map[string]bool)
 
@@ -145,23 +148,23 @@ func getAllConsulServices() (error, map[string]bool) {
 	resp, err := myClient.Get(url)
 	if err != nil {
 		glog.Errorf("Error doing http Get. %v", err)
-		return err, svcSummary
+		return svcSummary, err
 	}
 	respData, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		glog.Infof("Not able to read response data. %v", err)
-		return err, svcSummary
+		glog.Errorf("Not able to read response data. %v", err)
+		return svcSummary, err
 	}
 
 	err = json.Unmarshal([]byte(respData), &services)
 	if err != nil {
-		glog.Infof("Not able to unmarshall the response. %v", err)
+		glog.Errorf("Not able to unmarshall the response. %v", err)
 	}
 	resp.Body.Close()
 
-	err, svcs := DBFindAllServicesOfTenantInCluster(MyNamespace)
+	svcs, err := DBFindAllServicesOfTenantInCluster(MyNamespace)
 	if err != nil {
-		glog.Infof("Not able to get tenant service info from DB")
+		glog.Error("Not able to get tenant service info from DB", err)
 	} else {
 		for _, dns := range svcs {
 			svcSummary[dns.ID] = false
@@ -169,6 +172,13 @@ func getAllConsulServices() (error, map[string]bool) {
 	}
 
 	// Now get the individual service info to update the DB
+	// TODO: This will become a scale issue soon. Consul unfortunately has no concept of
+	// seggregating services across "namespaces". So this RR pod which runs in each tenant's
+	// namespace will fetch the entire catalog containing ALL tenants and then filter out
+	// one tenant (ourselves). We NEED to find some way of organizing data in consul per-tenant
+	// One saving grace can be that we can keep the RR pod on a seperate machine/node by itself
+	// and that seperate machine will have a consul agent of its own. So we are isolating high
+	// CPU and network usage to just one node because the RR to consul-agent is a local http access
 	url = "http://" + MyNode + ".node.consul:8500/v1/catalog/service"
 	for key, _ := range services {
 		var sInfo serviceDetail
@@ -180,17 +190,18 @@ func getAllConsulServices() (error, map[string]bool) {
 		resp, err := myClient.Get(url + "/" + key)
 		if err != nil {
 			glog.Errorf("Error doing http Get. %v", err)
-			return err, svcSummary
+			continue
 		}
 		// Check for status 200 and take appropriate action
 		respData, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
 			glog.Infof("Not able to read service %s response data. %v", key, err)
-			return err, svcSummary
+			continue
 		}
 		err = json.Unmarshal([]byte(respData), &sInfo)
 		if err != nil {
 			glog.Infof("Not able to unmarshall the response. %v", err)
+			continue
 		}
 		dns.ID = sInfo[0].ServiceID
 		dns.Name = sInfo[0].ServiceName
@@ -206,11 +217,18 @@ func getAllConsulServices() (error, map[string]bool) {
 			} else {
 				// Service doesn't exist in DB
 				glog.Infof("markAndSweep: Add service %s to DB", dns.ID)
-				DBUpdateService(&dns)
-				svcSummary[dns.ID] = true
+				for {
+					err = DBUpdateService(&dns)
+					if err == nil {
+						break
+					}
+					glog.Error("M&S: DBUpdate error", err)
+					time.Sleep(2 * time.Second)
+				}
+				svcSummary[dns.ID] = false
 			}
 		}
 		defer resp.Body.Close()
 	}
-	return err, svcSummary
+	return svcSummary, err
 }

@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"os"
-	"time"
 
 	"github.com/golang/glog"
 	"go.mongodb.org/mongo-driver/bson"
@@ -15,7 +13,6 @@ import (
 )
 
 var dbClient *mongo.Client
-var unitTesting bool
 
 // Collections specific to this cluster for tracking users and services
 var serviceDB *mongo.Database
@@ -29,7 +26,7 @@ func GetEnv(key string, defaultValue string) string {
 	return v
 }
 
-func DBConnect() bool {
+func DBConnect(namespace string) bool {
 	var err error
 	dbClient, err = mongo.NewClient(options.Client().ApplyURI(MyMongo))
 	if err != nil {
@@ -48,19 +45,10 @@ func DBConnect() bool {
 		return false
 	}
 
-	serviceDB = dbClient.Database("NxtDB")
+	serviceDB = dbClient.Database("Nxt-" + namespace + "-DB")
 	serviceCltn = serviceDB.Collection("NxtServices")
 
 	return true
-}
-
-func DBCheckError(err error) {
-	// If there is network or timeout error from the server, sit in a loop until
-	// its cleared as we can't do much until the DB is accessible again.
-	for mongo.IsNetworkError(err) || mongo.IsTimeout(err) {
-		glog.Infof("DB Error : %v", err)
-		time.Sleep(2 * time.Second)
-	}
 }
 
 // Json structure for registering consul service
@@ -77,14 +65,6 @@ type svcInfo struct {
 }
 
 func DBUpdateService(dns *svcInfo) error {
-	if unitTesting {
-		mongoErr := GetEnv("TEST_MONGO_ERR", "NOT_TEST")
-		if mongoErr == "true" {
-			glog.Error("Mongo UT error")
-			return errors.New("Mongo  unit test error")
-		}
-	}
-
 	// The upsert option asks the DB to add if one is not found
 	upsert := true
 	after := options.After
@@ -102,7 +82,6 @@ func DBUpdateService(dns *svcInfo) error {
 	)
 
 	if err.Err() != nil {
-		DBCheckError(err.Err())
 		return err.Err()
 	}
 	glog.Infof("%s service record added to DB successfully", dns.ID)
@@ -110,21 +89,12 @@ func DBUpdateService(dns *svcInfo) error {
 }
 
 func DBDeleteService(id string) error {
-	if unitTesting {
-		mongoErr := GetEnv("TEST_MONGO_ERR", "NOT_TEST")
-		if mongoErr == "true" {
-			glog.Error("Mongo UT error")
-			return errors.New("Mongo unit test error")
-		}
-	}
-
 	_, err := serviceCltn.DeleteOne(
 		context.TODO(),
 		bson.M{"_id": id},
 	)
 
 	if err != nil {
-		DBCheckError(err)
 		return err
 	}
 	glog.Infof("%s service record deleted from DB successfully", id)
@@ -133,14 +103,7 @@ func DBDeleteService(id string) error {
 }
 
 // Return the svcInfo associated with the id.
-func DBFindService(id string) (error, *svcInfo) {
-	if unitTesting {
-		mongoErr := GetEnv("TEST_MONGO_ERR", "NOT_TEST")
-		if mongoErr == "true" {
-			glog.Error("Mongo UT error")
-			return errors.New("Mongo unit test error"), nil
-		}
-	}
+func DBFindService(id string) (*svcInfo, error) {
 	var svc svcInfo
 
 	err := serviceCltn.FindOne(
@@ -152,58 +115,38 @@ func DBFindService(id string) (error, *svcInfo) {
 	}
 
 	if err != nil {
-		DBCheckError(err)
-		return err, nil
+		return nil, err
 	}
-	return nil, &svc
+	return &svc, nil
 }
 
 // Find all service documents corresponding to a tenant namespace
-func DBFindAllServicesOfTenant(tenant string) (error, []svcInfo) {
-
-	if unitTesting {
-		mongoErr := GetEnv("TEST_MONGO_ERR", "NOT_TEST")
-		if mongoErr == "true" {
-			glog.Error("Mongo UT error")
-			return errors.New("Mongo  unit test error"), nil
-		}
-	}
-
+func DBFindAllServicesOfTenant(tenant string) ([]svcInfo, error) {
 	var svcs []svcInfo
-	cursor, err := serviceCltn.Find(
-		context.TODO(),
-		bson.M{"Name": primitive.Regex{Pattern: tenant, Options: ""}})
+	cursor, err := serviceCltn.Find(context.TODO(), bson.M{})
 
 	if err == mongo.ErrNoDocuments {
 		return nil, nil
 	}
 
 	if err != nil {
-		DBCheckError(err)
-		return err, nil
+		return nil, err
 	}
 
 	err = cursor.All(context.TODO(), &svcs)
 	if err != nil {
-		DBCheckError(err)
-		return err, nil
+		return nil, err
 	}
-	return nil, svcs
+	return svcs, nil
 }
 
 // Find all service documents corresponding to tenant ns on this cluster
-func DBFindAllServicesOfTenantInCluster(tenant string) (error, []svcInfo) {
-
-	if unitTesting {
-		mongoErr := GetEnv("TEST_MONGO_ERR", "NOT_TEST")
-		if mongoErr == "true" {
-			glog.Error("Mongo UT error")
-			return errors.New("Mongo  unit test error"), nil
-		}
-	}
-
+func DBFindAllServicesOfTenantInCluster(tenant string) ([]svcInfo, error) {
 	var svcs []svcInfo
 
+	// TODO: Will this regex become heavy on mongo ? If it does, we can organize
+	// the collection per cluster. Lets just keep it simple for now, we will do
+	// that if we see this becomes an issue
 	cursor, err := serviceCltn.Find(
 		context.TODO(),
 		bson.M{"Name": primitive.Regex{Pattern: tenant, Options: ""}, "Meta.NextensioCluster": MyCluster})
@@ -213,14 +156,12 @@ func DBFindAllServicesOfTenantInCluster(tenant string) (error, []svcInfo) {
 	}
 
 	if err != nil {
-		DBCheckError(err)
-		return err, nil
+		return nil, err
 	}
 
 	err = cursor.All(context.TODO(), &svcs)
 	if err != nil {
-		DBCheckError(err)
-		return err, nil
+		return nil, err
 	}
-	return nil, svcs
+	return svcs, nil
 }
